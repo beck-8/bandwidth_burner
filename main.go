@@ -58,10 +58,15 @@ func main() {
 			defaultTimeout = val
 		}
 	}
+	defaultKeepAlives := false
+	if envKeepAlives := os.Getenv("KeepAlives"); envKeepAlives != "" {
+		defaultKeepAlives = true
+	}
 
 	showVersion := flag.Bool("v", false, "Show version")
 	concurrency := flag.Int("c", defaultConcurrency, "Number of concurrent downloads")
 	timeout := flag.Int("t", defaultTimeout, "Runtime in seconds (0 for no timeout)")
+	keepAlives := flag.Bool("k", defaultKeepAlives, "Enable keepAlives")
 	flag.Parse()
 
 	if *showVersion {
@@ -100,9 +105,11 @@ func main() {
 	client := &http.Client{
 		Transport: &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
-			DisableKeepAlives:     true,
+			DisableKeepAlives:     !*keepAlives,
+			MaxIdleConnsPerHost:   100,
+			IdleConnTimeout:       time.Second * 90,
 			TLSHandshakeTimeout:   time.Second * 30,
-			ResponseHeaderTimeout: time.Second * 30,
+			ResponseHeaderTimeout: time.Second * 10,
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: true,
 			},

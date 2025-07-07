@@ -1,6 +1,10 @@
 package utils
 
-import "math/rand/v2"
+import (
+	"fmt"
+	"math/rand/v2"
+	"strings"
+)
 
 var userAgents = []string{
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/65.0.3325.162 Safari/537.36",
@@ -259,6 +263,181 @@ var (
 	uaLen = len(userAgents)
 )
 
+// Randomly returned from the list of existing userAgents
 func RandUserAgent() string {
 	return userAgents[rand.IntN(uaLen)]
+}
+
+var (
+	desktopPlatforms = []string{
+		"Windows NT 10.0; Win64; x64",
+		"Windows NT 11.0; Win64; x64",
+		"Macintosh; Intel Mac OS X 14_6_1",
+		"Macintosh; Intel Mac OS X 14_5",
+		"Macintosh; Intel Mac OS X 10_15_7",
+		"X11; Linux x86_64",
+	}
+	mobilePlatforms = []string{
+		"Linux; Android 14", "Linux; Android 13", "Linux; Android 12",
+		"iPhone; CPU iPhone OS 18_0 like Mac OS X",
+		"iPhone; CPU iPhone OS 17_6 like Mac OS X",
+		"iPhone; CPU iPhone OS 17_4_1 like Mac OS X",
+		"iPhone; CPU iPhone OS 16_6 like Mac OS X",
+	}
+
+	chromeVersions = []string{
+		"129.0.6668.81", "128.0.6533.103", "127.0.6478.134", "126.0.6427.121",
+		"125.0.6368.120", "124.0.6280.78", "123.0.6200.90", "122.0.6120.45",
+	}
+	firefoxVersions = []string{
+		"130.0", "129.0", "128.0", "127.0", "126.0",
+	}
+	safariVersions = []string{
+		"17.5", "17.4.1", "17.3", "17.0", "16.6", "16.0",
+	}
+	edgeVersions = []string{
+		"129.0.2792.79", "128.0.2739.79", "127.0.2651.105", "126.0.2592.102", "125.0.2535.92",
+	}
+	webkitVersions = []string{"537.36", "605.1.15"}
+	androidDevices = []string{
+		// Google Pixel 系列
+		"Pixel 8 Pro", "Pixel 8", "Pixel 7 Pro", "Pixel 7", "Pixel 6 Pro", "Pixel 6a",
+
+		// Samsung Galaxy S 系列（高端旗舰）
+		"SM-S928B", // Galaxy S24 Ultra
+		"SM-S926B", // Galaxy S24+
+		"SM-S916B", // Galaxy S24
+		"SM-S918B", // Galaxy S23 Ultra
+		"SM-S916B", // Galaxy S23
+		"SM-S901B", // Galaxy S22
+		"SM-G998B", // S21 Ultra
+		"SM-G973F", // S10
+
+		// Samsung A 系列（中端主流）
+		"SM-A536B",  // A53
+		"SM-A546B",  // A54
+		"SM-A525F",  // A52
+		"SM-A715F",  // A71
+		"SM-A146P",  // A14
+		"SM-A146U1", // A14 US
+
+		// OnePlus 系列
+		"CPH2481", // OnePlus 11
+		"CPH2417", // OnePlus 10 Pro
+		"CPH2451", // OnePlus Nord CE 3 Lite
+
+		// Xiaomi 系列
+		"23078PND5G", // Xiaomi 13T
+		"2201123G",   // Xiaomi 12
+		"2112123AC",  // Xiaomi Mi 11
+
+		// Redmi 系列
+		"23021RAAEG", // Redmi Note 12 Pro
+		"2201116TG",  // Redmi Note 11 Pro
+
+		// Huawei / Honor 系列
+		"NOH-AN00", // Huawei Mate 40 Pro
+		"PGT-AN00", // Huawei P60 Pro
+		"ANY-AN00", // Honor 90
+		"ALP-AL00", // Huawei Mate 10 Pro
+
+		// OPPO / Realme
+		"CPH2565", // OPPO Reno 10
+		"RMX3686", // Realme 11 Pro+
+
+		// Vivo
+		"V2241A", // Vivo X90 Pro+
+		"V2164A", // Vivo S16 Pro
+
+		// 中性/保守设备标识
+		// "Android SDK built for x86", // 模拟器
+		// "Generic Android Device",
+	}
+	androidBuilds = []string{
+		"UP1A.231005.007", "TP1A.220624.014", "SP1A.210812.016", "UQ1A.231205.015",
+	}
+)
+
+// GenerateRandomUA generates a realistic user agent based on randomized platform/browser
+func GenerateRandomUA() string {
+	var ua strings.Builder
+	ua.WriteString("Mozilla/5.0 (")
+
+	isMobile := rand.IntN(3) == 0 // ~33% chance to use mobile UA
+	var platform string
+
+	if isMobile {
+		platform = mobilePlatforms[rand.IntN(len(mobilePlatforms))]
+	} else {
+		platform = desktopPlatforms[rand.IntN(len(desktopPlatforms))]
+	}
+	ua.WriteString(platform)
+
+	// Add device + build info for Android
+	if strings.Contains(platform, "Android") {
+		device := androidDevices[rand.IntN(len(androidDevices))]
+		build := androidBuilds[rand.IntN(len(androidBuilds))]
+		ua.WriteString(fmt.Sprintf("; %s Build/%s", device, build))
+	}
+
+	ua.WriteString(") AppleWebKit/")
+	ua.WriteString(webkitVersions[rand.IntN(len(webkitVersions))])
+	ua.WriteString(" (KHTML, like Gecko) ")
+
+	// Choose browser based on platform
+	switch {
+	case strings.Contains(platform, "Android"):
+		ua.WriteString("Chrome/")
+		ua.WriteString(chromeVersions[rand.IntN(len(chromeVersions))])
+		ua.WriteString(" Mobile Safari/")
+		ua.WriteString(webkitVersions[rand.IntN(len(webkitVersions))])
+
+	case strings.Contains(platform, "iPhone"):
+		ua.WriteString("Version/")
+		ua.WriteString(safariVersions[rand.IntN(len(safariVersions))])
+		ua.WriteString(" Mobile/15E148 Safari/604.1")
+
+	case strings.Contains(platform, "Macintosh"):
+		if rand.IntN(3) == 0 {
+			ua.WriteString("Version/")
+			ua.WriteString(safariVersions[rand.IntN(len(safariVersions))])
+			ua.WriteString(" Safari/605.1.15")
+		} else {
+			ua.WriteString("Chrome/")
+			ua.WriteString(chromeVersions[rand.IntN(len(chromeVersions))])
+			ua.WriteString(" Safari/")
+			ua.WriteString(webkitVersions[rand.IntN(len(webkitVersions))])
+		}
+
+	case strings.Contains(platform, "Windows"):
+		r := rand.IntN(100)
+		switch {
+		case r < 60:
+			ua.WriteString("Chrome/")
+			ua.WriteString(chromeVersions[rand.IntN(len(chromeVersions))])
+			ua.WriteString(" Safari/")
+			ua.WriteString(webkitVersions[rand.IntN(len(webkitVersions))])
+		case r < 85:
+			ua.WriteString("Edge/")
+			ua.WriteString(edgeVersions[rand.IntN(len(edgeVersions))])
+			ua.WriteString(" Safari/")
+			ua.WriteString(webkitVersions[rand.IntN(len(webkitVersions))])
+		default:
+			ua.WriteString("Firefox/")
+			ua.WriteString(firefoxVersions[rand.IntN(len(firefoxVersions))])
+		}
+
+	case strings.Contains(platform, "Linux"):
+		if rand.IntN(2) == 0 {
+			ua.WriteString("Firefox/")
+			ua.WriteString(firefoxVersions[rand.IntN(len(firefoxVersions))])
+		} else {
+			ua.WriteString("Chrome/")
+			ua.WriteString(chromeVersions[rand.IntN(len(chromeVersions))])
+			ua.WriteString(" Safari/")
+			ua.WriteString(webkitVersions[rand.IntN(len(webkitVersions))])
+		}
+	}
+
+	return ua.String()
 }
