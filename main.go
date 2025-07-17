@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bandwidth_burner/utils"
 	"crypto/tls"
 	"flag"
 	"fmt"
@@ -16,6 +15,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/beck-8/bandwidth_burner/utils"
 )
 
 var (
