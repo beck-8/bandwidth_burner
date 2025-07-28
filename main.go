@@ -23,6 +23,10 @@ var (
 	Version       string = "dev"
 	CurrentCommit string = "unknown"
 	totalBytes    atomic.Uint64
+	concurrency   int
+	timeout       int
+	keepAlives    bool
+	userAgent     string
 )
 
 type CountingReader struct {
@@ -42,10 +46,7 @@ func (cr *CountingReader) Close() error {
 	return cr.reader.Close()
 }
 
-func main() {
-	startTime := time.Now()
-	log.Printf("程序启动，版本: %s-%s", Version, CurrentCommit)
-
+func init() {
 	defaultConcurrency := 32
 	if envConcurrency := os.Getenv("CONCURRENCY"); envConcurrency != "" {
 		if val, err := strconv.Atoi(envConcurrency); err == nil && val > 0 {
@@ -63,17 +64,26 @@ func main() {
 	if envKeepAlives := os.Getenv("KeepAlives"); envKeepAlives != "" {
 		defaultKeepAlives = true
 	}
+	defaultUserAgent := ""
+	if envUserAgent := os.Getenv("UserAgent"); envUserAgent != "" {
+		defaultUserAgent = envUserAgent
+	}
 
+	flag.IntVar(&concurrency, "c", defaultConcurrency, "Number of concurrent downloads")
+	flag.IntVar(&timeout, "t", defaultTimeout, "Runtime in seconds (0 for no timeout)")
+	flag.BoolVar(&keepAlives, "k", defaultKeepAlives, "Enable keepAlives")
+	flag.StringVar(&userAgent, "ua", defaultUserAgent, "Specify UserAgent, and do not specify it will be random")
 	showVersion := flag.Bool("v", false, "Show version")
-	concurrency := flag.Int("c", defaultConcurrency, "Number of concurrent downloads")
-	timeout := flag.Int("t", defaultTimeout, "Runtime in seconds (0 for no timeout)")
-	keepAlives := flag.Bool("k", defaultKeepAlives, "Enable keepAlives")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Printf("Version: %s\nCommit: %s\n", Version, CurrentCommit)
-		return
+		os.Exit(0)
 	}
+}
+func main() {
+	startTime := time.Now()
+	log.Printf("程序启动，版本: %s-%s", Version, CurrentCommit)
 
 	var urls []string
 	if flag.NArg() > 0 {
@@ -106,7 +116,7 @@ func main() {
 	client := &http.Client{
 		Transport: &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
-			DisableKeepAlives:     !*keepAlives,
+			DisableKeepAlives:     !keepAlives,
 			MaxIdleConnsPerHost:   100,
 			IdleConnTimeout:       time.Second * 90,
 			TLSHandshakeTimeout:   time.Second * 30,
@@ -134,9 +144,9 @@ func main() {
 		os.Exit(1)
 	}()
 
-	if *timeout > 0 {
+	if timeout > 0 {
 		go func() {
-			time.Sleep(time.Duration(*timeout) * time.Second)
+			time.Sleep(time.Duration(timeout) * time.Second)
 			elapsed := time.Since(startTime).Seconds()
 			totalMB := float64(totalBytes.Load()) / 1024 / 1024
 			avgSpeed := 0.0
@@ -148,7 +158,7 @@ func main() {
 		}()
 	}
 
-	for i := 0; i < *concurrency; i++ {
+	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -173,7 +183,11 @@ func download(client *http.Client, url string) {
 		return
 	}
 
-	req.Header.Set("User-Agent", utils.RandUserAgent())
+	if userAgent != "" {
+		req.Header.Set("User-Agent", userAgent)
+	} else {
+		req.Header.Set("User-Agent", utils.RandUserAgent())
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
