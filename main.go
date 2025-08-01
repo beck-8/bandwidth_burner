@@ -27,7 +27,31 @@ var (
 	timeout       int
 	keepAlives    bool
 	userAgent     string
+	customHeaders headersFlag
 )
+
+type headersFlag struct {
+	m map[string]string
+}
+
+func (h *headersFlag) String() string {
+	var parts []string
+	for k, v := range h.m {
+		parts = append(parts, fmt.Sprintf("%s: %s", k, v))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func (h *headersFlag) Set(s string) error {
+	parts := strings.SplitN(s, ":", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid header format: %s (expected 'Key: Value')", s)
+	}
+	key := strings.TrimSpace(parts[0])
+	value := strings.TrimSpace(parts[1])
+	h.m[key] = value
+	return nil
+}
 
 type CountingReader struct {
 	reader io.ReadCloser
@@ -74,6 +98,8 @@ func init() {
 	flag.BoolVar(&keepAlives, "k", defaultKeepAlives, "Enable keepAlives")
 	flag.StringVar(&userAgent, "ua", defaultUserAgent, "Specify UserAgent, and do not specify it will be random")
 	showVersion := flag.Bool("v", false, "Show version")
+	customHeaders.m = make(map[string]string)
+	flag.Var(&customHeaders, "h", "Add a custom header in 'Key: Value' format (can be specified multiple times)")
 	flag.Parse()
 
 	if *showVersion {
@@ -189,6 +215,10 @@ func download(client *http.Client, url string) {
 		req.Header.Set("User-Agent", utils.RandUserAgent())
 	}
 
+	for key, value := range customHeaders.m {
+		req.Header.Set(key, value)
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Println("请求失败:", err)
@@ -198,7 +228,6 @@ func download(client *http.Client, url string) {
 
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("状态码非200, StatusCode: %v, url: %s\n", resp.StatusCode, url)
-		return
 	}
 
 	countingReader := &CountingReader{
