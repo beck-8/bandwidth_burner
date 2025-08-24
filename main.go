@@ -158,28 +158,36 @@ func main() {
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		sig := <-sigChan
+	calculateStats := func() (totalGB float64, avgSpeed float64) {
 		elapsed := time.Since(startTime).Seconds()
 		totalMB := float64(totalBytes.Load()) / 1024 / 1024
-		avgSpeed := 0.0
+		totalGB = totalMB / 1024
+		avgSpeed = 0.0
 		if elapsed > 0 {
 			avgSpeed = totalMB / elapsed
 		}
-		log.Printf("收到终止信号 %v，总共消耗流量: %.3f GB，平均速度: %.3f MB/s", sig, totalMB/1024, avgSpeed)
+		return totalGB, avgSpeed
+	}
+	go func() {
+		sig := <-sigChan
+		totalGB, avgSpeed := calculateStats()
+		log.Printf("收到终止信号 %v，总共消耗流量: %.3f GiB，平均速度: %.3f MB/s", sig, totalGB, avgSpeed)
 		os.Exit(1)
 	}()
-
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			<-ticker.C
+			totalGB, avgSpeed := calculateStats()
+			log.Printf("当前总共消耗流量: %.3f GiB，平均速度: %.3f MB/s", totalGB, avgSpeed)
+		}
+	}()
 	if timeout > 0 {
 		go func() {
 			time.Sleep(time.Duration(timeout) * time.Second)
-			elapsed := time.Since(startTime).Seconds()
-			totalMB := float64(totalBytes.Load()) / 1024 / 1024
-			avgSpeed := 0.0
-			if elapsed > 0 {
-				avgSpeed = totalMB / elapsed
-			}
-			log.Printf("超时结束，总共消耗流量: %.3f GB，平均速度: %.3f MB/s", totalMB/1024, avgSpeed)
+			totalGB, avgSpeed := calculateStats()
+			log.Printf("超时结束，总共消耗流量: %.3f GiB，平均速度: %.3f MB/s", totalGB, avgSpeed)
 			os.Exit(0)
 		}()
 	}
