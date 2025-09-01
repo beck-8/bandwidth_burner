@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -28,6 +30,7 @@ var (
 	keepAlives    bool
 	userAgent     string
 	customHeaders headersFlag
+	resolveMap    resolveFlag
 )
 
 type headersFlag struct {
@@ -51,6 +54,74 @@ func (h *headersFlag) Set(s string) error {
 	value := strings.TrimSpace(parts[1])
 	h.m[key] = value
 	return nil
+}
+
+// resolveFlag 实现自定义域名解析映射
+type resolveFlag struct {
+	m map[string]string // host:port -> ip
+}
+
+func (r *resolveFlag) String() string {
+	var parts []string
+	for k, v := range r.m {
+		parts = append(parts, fmt.Sprintf("%s:%s", k, v))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func (r *resolveFlag) Set(s string) error {
+	// 支持格式: domain:port:ip 或 domain::ip (默认端口80)
+	parts := strings.Split(s, ":")
+	if len(parts) < 3 {
+		return fmt.Errorf("invalid resolve format: %s (expected 'domain:port:ip' or 'domain::ip')", s)
+	}
+
+	domain := parts[0]
+	port := parts[1]
+	ip := strings.Join(parts[2:], ":") // 支持IPv6地址
+
+	if domain == "" {
+		return fmt.Errorf("domain cannot be empty")
+	}
+
+	// 验证IP地址格式
+	if net.ParseIP(ip) == nil {
+		return fmt.Errorf("invalid IP address: %s", ip)
+	}
+
+	// 如果端口为空，默认使用80
+	if port == "" {
+		port = "80"
+	}
+
+	key := fmt.Sprintf("%s:%s", domain, port)
+	r.m[key] = ip
+	return nil
+}
+
+// customDialer 实现自定义域名解析的拨号器
+func customDialer(resolveMap map[string]string) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		// 检查是否有自定义解析
+		if ip, exists := resolveMap[addr]; exists {
+			// 替换地址中的主机名为指定的IP
+			_, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			newAddr := net.JoinHostPort(ip, port)
+			// log.Printf("解析 %s -> %s", addr, newAddr)
+			return dialer.DialContext(ctx, network, newAddr)
+		}
+
+		// 使用默认解析
+		return dialer.DialContext(ctx, network, addr)
+	}
 }
 
 type CountingReader struct {
@@ -100,6 +171,8 @@ func init() {
 	showVersion := flag.Bool("v", false, "Show version")
 	customHeaders.m = make(map[string]string)
 	flag.Var(&customHeaders, "h", "Add a custom header in 'Key: Value' format (can be specified multiple times)")
+	resolveMap.m = make(map[string]string)
+	flag.Var(&resolveMap, "resolve", "Force resolve HOST:PORT to IP (can be specified multiple times, format: 'host:port:ip' or 'host::ip')")
 	flag.Parse()
 
 	if *showVersion {
@@ -139,18 +212,27 @@ func main() {
 		return
 	}
 
-	client := &http.Client{
-		Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			DisableKeepAlives:     !keepAlives,
-			MaxIdleConnsPerHost:   100,
-			IdleConnTimeout:       time.Second * 90,
-			TLSHandshakeTimeout:   time.Second * 30,
-			ResponseHeaderTimeout: time.Second * 10,
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
-			},
+	// 创建HTTP传输配置
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DisableKeepAlives:     !keepAlives,
+		MaxIdleConnsPerHost:   100,
+		IdleConnTimeout:       time.Second * 90,
+		TLSHandshakeTimeout:   time.Second * 30,
+		ResponseHeaderTimeout: time.Second * 10,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
 		},
+	}
+
+	// 如果有自定义域名解析，使用自定义拨号器
+	if len(resolveMap.m) > 0 {
+		transport.DialContext = customDialer(resolveMap.m)
+		log.Printf("已配置自定义域名解析: %v", resolveMap.m)
+	}
+
+	client := &http.Client{
+		Transport: transport,
 	}
 
 	var wg sync.WaitGroup
