@@ -25,6 +25,7 @@ var (
 	Version       string = "dev"
 	CurrentCommit string = "unknown"
 	totalBytes    atomic.Uint64
+	lastBytes     atomic.Uint64
 	concurrency   int
 	timeout       int
 	keepAlives    bool
@@ -250,21 +251,43 @@ func main() {
 		}
 		return totalGB, avgSpeed
 	}
+
+	// 30秒定时输出，包含实时速度和平均速度
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		lastBytes.Store(totalBytes.Load())
+		lastOutputTime := time.Now()
+
+		for {
+			<-ticker.C
+			currentTime := time.Now()
+			currentBytes := totalBytes.Load()
+			lastBytesValue := lastBytes.Load()
+
+			// 计算30秒内的实时速度
+			bytesInPeriod := currentBytes - lastBytesValue
+			elapsedSeconds := currentTime.Sub(lastOutputTime).Seconds()
+			realtimeSpeedMB := float64(bytesInPeriod) / 1024 / 1024 / elapsedSeconds
+
+			// 计算总统计
+			totalGB, avgSpeed := calculateStats()
+
+			log.Printf("实时速度: %.3f MB/s | 总流量: %.3f GiB | 平均速度: %.3f MB/s",
+				realtimeSpeedMB, totalGB, avgSpeed)
+
+			// 更新记录
+			lastBytes.Store(currentBytes)
+			lastOutputTime = currentTime
+		}
+	}()
 	go func() {
 		sig := <-sigChan
 		totalGB, avgSpeed := calculateStats()
 		log.Printf("收到终止信号 %v，总共消耗流量: %.3f GiB，平均速度: %.3f MB/s", sig, totalGB, avgSpeed)
 		os.Exit(1)
 	}()
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			<-ticker.C
-			totalGB, avgSpeed := calculateStats()
-			log.Printf("当前总共消耗流量: %.3f GiB，平均速度: %.3f MB/s", totalGB, avgSpeed)
-		}
-	}()
+
 	if timeout > 0 {
 		go func() {
 			time.Sleep(time.Duration(timeout) * time.Second)
