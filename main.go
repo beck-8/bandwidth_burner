@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -12,120 +11,23 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/urfave/cli/v2"
+
 	"github.com/beck-8/bandwidth_burner/utils"
 )
 
 var (
-	Version       string = "dev"
-	CurrentCommit string = "unknown"
+	Version       = "dev"
+	CurrentCommit = "unknown"
 	totalBytes    atomic.Uint64
 	lastBytes     atomic.Uint64
-	concurrency   int
-	timeout       int
-	keepAlives    bool
-	userAgent     string
-	customHeaders headersFlag
-	resolveMap    resolveFlag
-	fileList      string
 )
-
-type headersFlag struct {
-	m map[string]string
-}
-
-func (h *headersFlag) String() string {
-	var parts []string
-	for k, v := range h.m {
-		parts = append(parts, fmt.Sprintf("%s: %s", k, v))
-	}
-	return strings.Join(parts, ", ")
-}
-
-func (h *headersFlag) Set(s string) error {
-	parts := strings.SplitN(s, ":", 2)
-	if len(parts) != 2 {
-		return fmt.Errorf("invalid header format: %s (expected 'Key: Value')", s)
-	}
-	key := strings.TrimSpace(parts[0])
-	value := strings.TrimSpace(parts[1])
-	h.m[key] = value
-	return nil
-}
-
-// resolveFlag 实现自定义域名解析映射
-type resolveFlag struct {
-	m map[string]string // host:port -> ip
-}
-
-func (r *resolveFlag) String() string {
-	var parts []string
-	for k, v := range r.m {
-		parts = append(parts, fmt.Sprintf("%s:%s", k, v))
-	}
-	return strings.Join(parts, ", ")
-}
-
-func (r *resolveFlag) Set(s string) error {
-	// 支持格式: domain:port:ip 或 domain::ip (默认端口80)
-	parts := strings.Split(s, ":")
-	if len(parts) < 3 {
-		return fmt.Errorf("invalid resolve format: %s (expected 'domain:port:ip' or 'domain::ip')", s)
-	}
-
-	domain := parts[0]
-	port := parts[1]
-	ip := strings.Join(parts[2:], ":") // 支持IPv6地址
-
-	if domain == "" {
-		return fmt.Errorf("domain cannot be empty")
-	}
-
-	// 验证IP地址格式
-	if net.ParseIP(ip) == nil {
-		return fmt.Errorf("invalid IP address: %s", ip)
-	}
-
-	// 如果端口为空，默认使用80
-	if port == "" {
-		port = "80"
-	}
-
-	key := fmt.Sprintf("%s:%s", domain, port)
-	r.m[key] = ip
-	return nil
-}
-
-// customDialer 实现自定义域名解析的拨号器
-func customDialer(resolveMap map[string]string) func(ctx context.Context, network, addr string) (net.Conn, error) {
-	dialer := &net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}
-
-	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		// 检查是否有自定义解析
-		if ip, exists := resolveMap[addr]; exists {
-			// 替换地址中的主机名为指定的IP
-			_, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, err
-			}
-			newAddr := net.JoinHostPort(ip, port)
-			// log.Printf("解析 %s -> %s", addr, newAddr)
-			return dialer.DialContext(ctx, network, newAddr)
-		}
-
-		// 使用默认解析
-		return dialer.DialContext(ctx, network, addr)
-	}
-}
 
 type CountingReader struct {
 	reader io.ReadCloser
@@ -144,83 +46,120 @@ func (cr *CountingReader) Close() error {
 	return cr.reader.Close()
 }
 
-func init() {
-	defaultConcurrency := 32
-	if envConcurrency := os.Getenv("CONCURRENCY"); envConcurrency != "" {
-		if val, err := strconv.Atoi(envConcurrency); err == nil && val > 0 {
-			defaultConcurrency = val
+// customDialer: 自定义域名解析
+func customDialer(resolveMap map[string]string) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if ip, exists := resolveMap[addr]; exists {
+			_, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			newAddr := net.JoinHostPort(ip, port)
+			return dialer.DialContext(ctx, network, newAddr)
 		}
-	}
-
-	defaultTimeout := 0
-	if envTimeout := os.Getenv("TIMEOUT"); envTimeout != "" {
-		if val, err := strconv.Atoi(envTimeout); err == nil && val >= 0 {
-			defaultTimeout = val
-		}
-	}
-	defaultKeepAlives := false
-	if envKeepAlives := os.Getenv("KeepAlives"); envKeepAlives != "" {
-		defaultKeepAlives = true
-	}
-	defaultUserAgent := ""
-	if envUserAgent := os.Getenv("UserAgent"); envUserAgent != "" {
-		defaultUserAgent = envUserAgent
-	}
-	defaultFileList := ""
-	if envFileList := os.Getenv("UserAgent"); envFileList != "" {
-		defaultFileList = envFileList
-	}
-
-	flag.IntVar(&concurrency, "c", defaultConcurrency, "Number of concurrent downloads")
-	flag.IntVar(&timeout, "t", defaultTimeout, "Runtime in seconds (0 for no timeout)")
-	flag.BoolVar(&keepAlives, "k", defaultKeepAlives, "Enable keepAlives")
-	flag.StringVar(&userAgent, "ua", defaultUserAgent, "Specify UserAgent, and do not specify it will be random")
-	showVersion := flag.Bool("v", false, "Show version")
-	customHeaders.m = make(map[string]string)
-	flag.Var(&customHeaders, "h", "Add a custom header in 'Key: Value' format (can be specified multiple times)")
-	resolveMap.m = make(map[string]string)
-	flag.Var(&resolveMap, "resolve", "Force resolve HOST:PORT to IP (can be specified multiple times, format: 'host:port:ip' or 'host::ip')")
-	flag.StringVar(&fileList, "f", defaultFileList, "Specify fileList")
-	flag.Parse()
-
-	if *showVersion {
-		fmt.Printf("Version: %s\nCommit: %s\n", Version, CurrentCommit)
-		os.Exit(0)
+		return dialer.DialContext(ctx, network, addr)
 	}
 }
+
 func main() {
+	app := &cli.App{
+		Name:    "bandwidth_burner",
+		Usage:   "HTTP 并发下载带宽测试工具",
+		Version: Version + "-" + CurrentCommit,
+		Flags: []cli.Flag{
+			&cli.IntFlag{
+				Name:    "concurrency",
+				Aliases: []string{"c"},
+				Usage:   "并发请求数",
+				Value:   32,
+				EnvVars: []string{"CONCURRENCY"},
+			},
+			&cli.IntFlag{
+				Name:    "timeout",
+				Aliases: []string{"t"},
+				Usage:   "运行时长 (秒, 0 表示无限制)",
+				Value:   0,
+				EnvVars: []string{"TIMEOUT"},
+			},
+			&cli.BoolFlag{
+				Name:    "keepalives",
+				Aliases: []string{"k"},
+				Usage:   "启用 keep-alive",
+				Value:   false,
+				EnvVars: []string{"KEEPALIVES"},
+			},
+			&cli.StringFlag{
+				Name:    "user-agent",
+				Aliases: []string{"ua"},
+				Usage:   "指定 User-Agent，不填则随机",
+				EnvVars: []string{"USERAGENT"},
+			},
+			&cli.StringSliceFlag{
+				Name:  "header",
+				Usage: "自定义请求头 (格式: 'Key: Value')，可多次指定",
+			},
+			&cli.StringSliceFlag{
+				Name:  "resolve",
+				Usage: "自定义解析 (格式: 'host:port:ip' 或 'host::ip')，可多次指定",
+			},
+			&cli.StringFlag{
+				Name:    "file",
+				Aliases: []string{"f"},
+				Usage:   "指定包含 URL 列表的文件",
+				EnvVars: []string{"DOWN_FILE"},
+			},
+		},
+		Action: func(c *cli.Context) error {
+			return run(
+				c.Int("concurrency"),
+				c.Int("timeout"),
+				c.Bool("keepalives"),
+				c.String("user-agent"),
+				parseHeaders(c.StringSlice("header")),
+				parseResolve(c.StringSlice("resolve")),
+				c.String("file"),
+				c.Args().Slice(),
+			)
+		},
+	}
+
+	if err := app.Run(os.Args); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run(concurrency, timeout int, keepAlives bool, userAgent string,
+	headers map[string]string, resolveMap map[string]string,
+	fileList string, urls []string) error {
+
 	startTime := time.Now()
 	log.Printf("程序启动，版本: %s-%s", Version, CurrentCommit)
 
-	var urls []string
-	if flag.NArg() > 0 {
-		urls = flag.Args()
-	} else {
-		if fileList != "" {
-			file, err := os.Open(fileList)
-			if err != nil {
-				log.Fatalln(err)
+	// 如果没传 URL 参数，从文件读取
+	if len(urls) == 0 && fileList != "" {
+		data, err := os.ReadFile(fileList)
+		if err != nil {
+			return fmt.Errorf("读取 fileList 失败: %w", err)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			u := strings.TrimSpace(line)
+			if u == "" || strings.HasPrefix(u, "#") {
+				continue
 			}
-			body, err := io.ReadAll(file)
-			if err != nil {
-				log.Fatalln(err)
-			}
-			for _, u := range strings.Split(string(body), "\n") {
-				u := strings.TrimSpace(u)
-				if strings.HasPrefix(u, "#") || u == "" {
-					continue
-				}
-				urls = append(urls, u)
-			}
+			urls = append(urls, u)
 		}
 	}
 
 	if len(urls) == 0 {
-		log.Fatalln("请提供至少一个URL")
-		return
+		return fmt.Errorf("请至少提供一个 URL")
 	}
 
-	// 创建HTTP传输配置
+	// HTTP Transport
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DisableKeepAlives:     !keepAlives,
@@ -232,101 +171,92 @@ func main() {
 			InsecureSkipVerify: true,
 		},
 	}
-
-	// 如果有自定义域名解析，使用自定义拨号器
-	if len(resolveMap.m) > 0 {
-		transport.DialContext = customDialer(resolveMap.m)
-		log.Printf("已配置自定义域名解析: %v", resolveMap.m)
+	if len(resolveMap) > 0 {
+		transport.DialContext = customDialer(resolveMap)
+		log.Printf("已配置自定义解析: %v", resolveMap)
 	}
 
-	client := &http.Client{
-		Transport: transport,
-	}
+	client := &http.Client{Transport: transport}
 
-	var wg sync.WaitGroup
-	urlChan := make(chan string)
-
+	// 统计 goroutine
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	calculateStats := func() (totalGB float64, avgSpeed float64) {
+
+	calcStats := func() (float64, float64) {
 		elapsed := time.Since(startTime).Seconds()
 		totalMB := float64(totalBytes.Load()) / 1024 / 1024
-		totalGB = totalMB / 1024
-		avgSpeed = 0.0
+		totalGB := totalMB / 1024
+		avgSpeed := 0.0
 		if elapsed > 0 {
 			avgSpeed = totalMB / elapsed
 		}
 		return totalGB, avgSpeed
 	}
 
-	// 30秒定时输出，包含实时速度和平均速度
+	// 定时打印
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		lastBytes.Store(totalBytes.Load())
-		lastOutputTime := time.Now()
+		lastTime := time.Now()
 
-		for {
-			<-ticker.C
-			currentTime := time.Now()
-			currentBytes := totalBytes.Load()
-			lastBytesValue := lastBytes.Load()
-
-			// 计算30秒内的实时速度
-			bytesInPeriod := currentBytes - lastBytesValue
-			elapsedSeconds := currentTime.Sub(lastOutputTime).Seconds()
-			realtimeSpeedMB := float64(bytesInPeriod) / 1024 / 1024 / elapsedSeconds
-
-			// 计算总统计
-			totalGB, avgSpeed := calculateStats()
-
+		for range ticker.C {
+			now := time.Now()
+			cur := totalBytes.Load()
+			diff := cur - lastBytes.Load()
+			sec := now.Sub(lastTime).Seconds()
+			speed := float64(diff) / 1024 / 1024 / sec
+			totalGB, avg := calcStats()
 			log.Printf("实时速度: %.3f MB/s | 总流量: %.3f GiB | 平均速度: %.3f MB/s",
-				realtimeSpeedMB, totalGB, avgSpeed)
-
-			// 更新记录
-			lastBytes.Store(currentBytes)
-			lastOutputTime = currentTime
+				speed, totalGB, avg)
+			lastBytes.Store(cur)
+			lastTime = now
 		}
 	}()
+
+	// 信号退出
 	go func() {
 		sig := <-sigChan
-		totalGB, avgSpeed := calculateStats()
-		log.Printf("收到终止信号 %v，总共消耗流量: %.3f GiB，平均速度: %.3f MB/s", sig, totalGB, avgSpeed)
-		os.Exit(1)
+		totalGB, avg := calcStats()
+		log.Printf("收到信号 %v，总流量: %.3f GiB，平均速度: %.3f MB/s", sig, totalGB, avg)
+		os.Exit(0)
 	}()
 
+	// 超时退出
 	if timeout > 0 {
 		go func() {
 			time.Sleep(time.Duration(timeout) * time.Second)
-			totalGB, avgSpeed := calculateStats()
-			log.Printf("超时结束，总共消耗流量: %.3f GiB，平均速度: %.3f MB/s", totalGB, avgSpeed)
+			totalGB, avg := calcStats()
+			log.Printf("超时退出，总流量: %.3f GiB，平均速度: %.3f MB/s", totalGB, avg)
 			os.Exit(0)
 		}()
 	}
 
+	// 启动 workers
+	var wg sync.WaitGroup
+	urlChan := make(chan string)
+
 	for i := 0; i < concurrency; i++ {
-		r := rand.New(rand.NewSource(time.Now().UnixNano()))
 		wg.Add(1)
+		r := rand.New(rand.NewSource(time.Now().UnixNano()))
 		go func() {
 			defer wg.Done()
-			// 随机时间，均匀发起请求
-			randomSeconds := r.Intn(10)
-			time.Sleep(time.Duration(randomSeconds) * time.Second)
-			for url := range urlChan {
-				download(client, url)
+			time.Sleep(time.Duration(r.Intn(10)) * time.Second)
+			for u := range urlChan {
+				download(client, u, userAgent, headers)
 			}
 		}()
 	}
 
+	// 无限循环
 	for {
-		for _, url := range urls {
-			urlChan <- url
+		for _, u := range urls {
+			urlChan <- u
 		}
 	}
-	// wg.Wait()
 }
 
-func download(client *http.Client, url string) {
+func download(client *http.Client, url, userAgent string, headers map[string]string) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		log.Println("创建请求失败:", err)
@@ -338,9 +268,8 @@ func download(client *http.Client, url string) {
 	} else {
 		req.Header.Set("User-Agent", utils.RandUserAgent())
 	}
-
-	for key, value := range customHeaders.m {
-		req.Header.Set(key, value)
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
 
 	resp, err := client.Do(req)
@@ -354,14 +283,35 @@ func download(client *http.Client, url string) {
 		log.Printf("状态码非200, StatusCode: %v, url: %s\n", resp.StatusCode, url)
 	}
 
-	countingReader := &CountingReader{
-		reader: resp.Body,
-		count:  &totalBytes,
-	}
-
+	countingReader := &CountingReader{reader: resp.Body, count: &totalBytes}
 	_, err = io.Copy(io.Discard, countingReader)
 	if err != nil {
 		log.Println("读取响应失败:", err)
-		return
 	}
+}
+
+func parseHeaders(list []string) map[string]string {
+	headers := make(map[string]string)
+	for _, h := range list {
+		parts := strings.SplitN(h, ":", 2)
+		if len(parts) == 2 {
+			headers[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+		}
+	}
+	return headers
+}
+
+func parseResolve(list []string) map[string]string {
+	m := make(map[string]string)
+	for _, r := range list {
+		parts := strings.Split(r, ":")
+		if len(parts) >= 3 {
+			domain, port, ip := parts[0], parts[1], strings.Join(parts[2:], ":")
+			if port == "" {
+				port = "80"
+			}
+			m[domain+":"+port] = ip
+		}
+	}
+	return m
 }

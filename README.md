@@ -22,8 +22,8 @@
 | timeout | -t | 0 | 运行时间限制(秒) | `-t 300` |
 | keep-alives | -k | false | 启用HTTP Keep-Alive | `-k` |
 | user-agent | -ua | 随机 | 自定义User-Agent | `-ua "Custom Bot"` |
-| header | -h | 无 | 自定义请求头 | `-h "Auth: Bearer token"` |
-| resolve | -resolve | 无 | 自定义域名解析 | `-resolve "example.com:80:1.2.3.4"` |
+| header | N/A | 无 | 自定义请求头 | `-h "Auth: Bearer token"` |
+| resolve | N/A | 无 | 自定义域名解析 | `-resolve "example.com:80:1.2.3.4"` |
 | version | -v | - | 显示版本信息 | `-v` |
 
 ### 环境变量支持
