@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -32,6 +33,7 @@ var (
 	userAgent     string
 	customHeaders headersFlag
 	resolveMap    resolveFlag
+	fileList      string
 )
 
 type headersFlag struct {
@@ -164,6 +166,10 @@ func init() {
 	if envUserAgent := os.Getenv("UserAgent"); envUserAgent != "" {
 		defaultUserAgent = envUserAgent
 	}
+	defaultFileList := ""
+	if envFileList := os.Getenv("UserAgent"); envFileList != "" {
+		defaultFileList = envFileList
+	}
 
 	flag.IntVar(&concurrency, "c", defaultConcurrency, "Number of concurrent downloads")
 	flag.IntVar(&timeout, "t", defaultTimeout, "Runtime in seconds (0 for no timeout)")
@@ -174,6 +180,7 @@ func init() {
 	flag.Var(&customHeaders, "h", "Add a custom header in 'Key: Value' format (can be specified multiple times)")
 	resolveMap.m = make(map[string]string)
 	flag.Var(&resolveMap, "resolve", "Force resolve HOST:PORT to IP (can be specified multiple times, format: 'host:port:ip' or 'host::ip')")
+	flag.StringVar(&fileList, "f", defaultFileList, "Specify fileList")
 	flag.Parse()
 
 	if *showVersion {
@@ -189,8 +196,8 @@ func main() {
 	if flag.NArg() > 0 {
 		urls = flag.Args()
 	} else {
-		if f := os.Getenv("DOWN_FILE"); f != "" {
-			file, err := os.Open(f)
+		if fileList != "" {
+			file, err := os.Open(fileList)
 			if err != nil {
 				log.Fatalln(err)
 			}
@@ -298,9 +305,13 @@ func main() {
 	}
 
 	for i := 0; i < concurrency; i++ {
+		r := rand.New(rand.NewSource(time.Now().UnixNano()))
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			// 随机时间，均匀发起请求
+			randomSeconds := r.Intn(10)
+			time.Sleep(time.Duration(randomSeconds) * time.Second)
 			for url := range urlChan {
 				download(client, url)
 			}
