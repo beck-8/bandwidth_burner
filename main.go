@@ -105,7 +105,7 @@ func main() {
 			},
 			&cli.StringSliceFlag{
 				Name:  "resolve",
-				Usage: "自定义解析 (格式: 'host:port:ip' 或 'host::ip')，可多次指定",
+				Usage: "自定义解析 (格式: 'host:port:ip')，可多次指定",
 			},
 			&cli.StringFlag{
 				Name:    "file",
@@ -304,14 +304,15 @@ func parseHeaders(list []string) map[string]string {
 func parseResolve(list []string) map[string]string {
 	m := make(map[string]string)
 	for _, r := range list {
-		parts := strings.Split(r, ":")
-		if len(parts) >= 3 {
-			domain, port, ip := parts[0], parts[1], strings.Join(parts[2:], ":")
-			if port == "" {
-				port = "80"
-			}
-			m[domain+":"+port] = ip
+		// 分割为至少三部分（domain:port:ip，ip可能含冒号）
+		parts := strings.SplitN(r, ":", 3) // 最多分割为3部分，避免IPv6被拆分过多
+		// 校验格式：必须至少3部分，且domain、port、ip均不为空
+		if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+			continue // 跳过无效格式
 		}
+		domain, port, ip := parts[0], parts[1], parts[2]
+		// 组合键（domain:port），存入map
+		m[domain+":"+port] = ip
 	}
 	return m
 }
