@@ -46,23 +46,49 @@ func (cr *CountingReader) Close() error {
 	return cr.reader.Close()
 }
 
-// customDialer: 自定义域名解析
-func customDialer(resolveMap map[string]string) func(ctx context.Context, network, addr string) (net.Conn, error) {
+// CountingConn 包装 net.Conn，统计真实的TCP层面的读写字节数
+type CountingConn struct {
+	net.Conn
+	readCount *atomic.Uint64
+}
+
+func (cc *CountingConn) Read(b []byte) (n int, err error) {
+	n, err = cc.Conn.Read(b)
+	if n > 0 {
+		cc.readCount.Add(uint64(n))
+	}
+	return
+}
+
+// customDialer: 自定义域名解析，并在TCP层面统计流量
+func customDialer(resolveMap map[string]string, counter *atomic.Uint64) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	dialer := &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
 	}
 
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		var conn net.Conn
+		var err error
+
 		if ip, exists := resolveMap[addr]; exists {
-			_, port, err := net.SplitHostPort(addr)
+			var port string
+			_, port, err = net.SplitHostPort(addr)
 			if err != nil {
 				return nil, err
 			}
 			newAddr := net.JoinHostPort(ip, port)
-			return dialer.DialContext(ctx, network, newAddr)
+			conn, err = dialer.DialContext(ctx, network, newAddr)
+		} else {
+			conn, err = dialer.DialContext(ctx, network, addr)
 		}
-		return dialer.DialContext(ctx, network, addr)
+
+		if err != nil {
+			return nil, err
+		}
+
+		// 包装成 CountingConn 以统计真实网络流量
+		return &CountingConn{Conn: conn, readCount: counter}, nil
 	}
 }
 
@@ -170,9 +196,10 @@ func run(concurrency, timeout int, keepAlives bool, userAgent string,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
 		},
+		// 始终使用自定义 DialContext 以统计真实网络流量
+		DialContext: customDialer(resolveMap, &totalBytes),
 	}
 	if len(resolveMap) > 0 {
-		transport.DialContext = customDialer(resolveMap)
 		log.Printf("已配置自定义解析: %v", resolveMap)
 	}
 
@@ -268,6 +295,7 @@ func download(client *http.Client, url, userAgent string, headers map[string]str
 	} else {
 		req.Header.Set("User-Agent", utils.RandUserAgent())
 	}
+
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -283,8 +311,8 @@ func download(client *http.Client, url, userAgent string, headers map[string]str
 		log.Printf("状态码非200, StatusCode: %v, url: %s\n", resp.StatusCode, url)
 	}
 
-	countingReader := &CountingReader{reader: resp.Body, count: &totalBytes}
-	_, err = io.Copy(io.Discard, countingReader)
+	// 流量统计已在 TCP 层面的 CountingConn 中完成，这里只需读取并丢弃数据
+	_, err = io.Copy(io.Discard, resp.Body)
 	if err != nil {
 		log.Println("读取响应失败:", err)
 	}
