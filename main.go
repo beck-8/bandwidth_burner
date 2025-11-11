@@ -26,7 +26,6 @@ var (
 	Version       = "dev"
 	CurrentCommit = "unknown"
 	totalBytes    atomic.Uint64
-	lastBytes     atomic.Uint64
 )
 
 type CountingReader struct {
@@ -70,7 +69,6 @@ func customDialer(resolveMap map[string]string, counter *atomic.Uint64) func(ctx
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		var conn net.Conn
 		var err error
-
 		if ip, exists := resolveMap[addr]; exists {
 			var port string
 			_, port, err = net.SplitHostPort(addr)
@@ -222,22 +220,19 @@ func run(concurrency, timeout int, keepAlives bool, userAgent string,
 
 	// 定时打印
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
-		lastBytes.Store(totalBytes.Load())
-		lastTime := time.Now()
 
 		for range ticker.C {
-			now := time.Now()
+			// 实时速度计算间隔ms
+			var t float64 = 1000
 			cur := totalBytes.Load()
-			diff := cur - lastBytes.Load()
-			sec := now.Sub(lastTime).Seconds()
-			speed := float64(diff) / 1024 / 1024 / sec
+			time.Sleep(time.Duration(t) * time.Millisecond)
+			diff := totalBytes.Load() - cur
+			speed := float64(diff) / 1024 / 1024 * 1000 / t
 			totalGB, avg := calcStats()
 			log.Printf("实时速度: %.3f MB/s | 总流量: %.3f GiB | 平均速度: %.3f MB/s",
 				speed, totalGB, avg)
-			lastBytes.Store(cur)
-			lastTime = now
 		}
 	}()
 
