@@ -7,3 +7,8 @@ https://s1.hdslb.com/bfs/game-static/web/caster/static/script/vue/da3f37d7fd8339
 https://gw.alicdn.com/tfscom/TB1fASCxhjaK1RjSZKzXXXVwXXa.jpg
 
 https://cdn.cnbj1.fds.api.mi-img.com/appstore-developer-web-fe/production/static/js/14.45dbc296.chunk.js
+
+https://cdns.bountech.com/marketfront/file/insurance/cdn/picture/NW/NWZA12/audio/shenfenzheng_2.wav
+https://static-cdn.iyb.tm/mktprod/mktprod/rp/static/js/chunk-vendors.45f9e28f.js
+https://cdns.bountech.com/marketfront/file/insurance/cdn/picture/NW/NWZA12/audio/shenfenzheng_1.wav
+https://static-cdn.iyb.tm/mktprod/mktprod/rp/img/img01_18.d361be06.png
