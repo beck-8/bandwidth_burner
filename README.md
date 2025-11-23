@@ -32,7 +32,7 @@
 |------|------|--------|------|------|
 | concurrency | -c | 32 | 并发下载数量 | `-c 64` |
 | timeout | -t | 0 | 运行时间限制(秒) | `-t 300` |
-| keep-alives | -k | false | 启用HTTP Keep-Alive | `-k` |
+| keep-alives | -k | true | 启用HTTP Keep-Alive | `-k` |
 | user-agent | -ua | 随机 | 自定义User-Agent | `-ua "Custom Bot"` |
 | header | N/A | 无 | 自定义请求头 | `-h "Auth: Bearer token"` |
 | resolve | N/A | 无 | 自定义域名解析 | `-resolve "example.com:80:1.2.3.4"` |
@@ -91,13 +91,13 @@ export DOWN_FILE=test-urls.txt
 ## 特性功能说明
 
 ### 流量监控机制
-- 每30秒输出当前流量统计
+- 每10秒输出当前流量统计
 - 支持总流量(GiB)和平均速度(MB/s)显示  
 - 程序退出时显示最终统计数据
 
 ### 自定义域名解析
 - 支持手动指定域名到IP的映射关系
-- 格式：`domain:port:ip` 或 `domain::ip`(默认端口80)
+- 格式：`domain:port:ip`
 - 支持IPv4和IPv6地址
 - 可同时指定多个映射关系
 
@@ -114,7 +114,6 @@ export DOWN_FILE=test-urls.txt
 ### Keep-Alive连接管理
 - 支持启用/禁用HTTP Keep-Alive
 - 启用后可复用TCP连接，提高效率
-- 默认禁用，需要手动启用
 
 ## URL文件格式说明
 
@@ -146,7 +145,7 @@ docker run --rm \
 ```bash
 docker run --rm \
   ghcr.io/beck-8/bandwidth_burner:latest \
-  -resolve "test.example.com::192.168.1.100" \
+  -resolve "test.example.com:443:192.168.1.100" \
   https://test.example.com/file.zip
 ```
 
