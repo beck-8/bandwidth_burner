@@ -114,7 +114,7 @@ func main() {
 				Name:    "keepalives",
 				Aliases: []string{"k"},
 				Usage:   "启用 keep-alive",
-				Value:   false,
+				Value:   true,
 				EnvVars: []string{"KEEPALIVES"},
 			},
 			&cli.StringFlag{

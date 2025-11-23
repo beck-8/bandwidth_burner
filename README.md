@@ -1,4 +1,16 @@
-# BandwidthBurner
+<h1 align="center">🚀 BandwidthBurner</h1>
+
+<p align="center">
+	<a href="https://github.com/beck-8/bandwidth_burner/releases"><img src="https://img.shields.io/github/v/release/beck-8/bandwidth_burner?style=flat-square&include_prereleases&label=version" /></a>
+	<a href="https://github.com/beck-8/bandwidth_burner/releases"><img src="https://img.shields.io/github/downloads/beck-8/bandwidth_burner/total.svg?style=flat-square" /></a>
+  <a href="https://hub.docker.com/r/beck8/bandwidth_burner/tags"><img src="https://img.shields.io/docker/pulls/beck8/bandwidth_burner" /></a>
+	<a href="https://github.com/beck-8/bandwidth_burner/issues"><img src="https://img.shields.io/github/issues-raw/beck-8/bandwidth_burner.svg?style=flat-square&label=issues" /></a>
+	<a href="https://github.com/beck-8/bandwidth_burner/graphs/contributors"><img src="https://img.shields.io/github/contributors/beck-8/bandwidth_burner?style=flat-square" /></a>
+	<a href="https://github.com/beck-8/bandwidth_burner/blob/master/LICENSE"><img src="https://img.shields.io/github/license/beck-8/bandwidth_burner?style=flat-square" /></a>
+</p>
+
+---
+
 带宽消耗下行流量
 
 一个用于带宽压力测试的工具，支持并发下载、流量统计、自动退出等功能。
