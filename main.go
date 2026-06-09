@@ -426,7 +426,13 @@ func run(concurrency, timeout, requestTimeout int, keepAlives bool, userAgent st
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
 		go func() {
 			defer wg.Done()
-			time.Sleep(time.Duration(r.Intn(10)) * time.Second)
+			// 启动错峰，避免所有 worker 同时打到目标；可被 ctx 取消打断，
+			// 否则 Ctrl-C 退出时 wg.Wait() 会干等这段睡眠结束 (最长 ~10s)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Duration(r.Intn(10)) * time.Second):
+			}
 			failStreak := 0
 			for {
 				select {
