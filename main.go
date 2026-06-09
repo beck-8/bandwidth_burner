@@ -23,27 +23,11 @@ import (
 )
 
 var (
-	Version       = "dev"
-	CurrentCommit = "unknown"
-	totalBytes    atomic.Uint64
+	Version             = "dev"
+	CurrentCommit       = "unknown"
+	totalBytes          atomic.Uint64
+	consecutiveFailures atomic.Int64
 )
-
-type CountingReader struct {
-	reader io.ReadCloser
-	count  *atomic.Uint64
-}
-
-func (cr *CountingReader) Read(p []byte) (n int, err error) {
-	n, err = cr.reader.Read(p)
-	if n > 0 {
-		cr.count.Add(uint64(n))
-	}
-	return
-}
-
-func (cr *CountingReader) Close() error {
-	return cr.reader.Close()
-}
 
 // CountingConn 包装 net.Conn，统计真实的TCP层面的读写字节数
 type CountingConn struct {
@@ -53,6 +37,14 @@ type CountingConn struct {
 
 func (cc *CountingConn) Read(b []byte) (n int, err error) {
 	n, err = cc.Conn.Read(b)
+	if n > 0 {
+		cc.readCount.Add(uint64(n))
+	}
+	return
+}
+
+func (cc *CountingConn) Write(b []byte) (n int, err error) {
+	n, err = cc.Conn.Write(b)
 	if n > 0 {
 		cc.readCount.Add(uint64(n))
 	}
@@ -110,6 +102,12 @@ func main() {
 				Value:   0,
 				EnvVars: []string{"TIMEOUT"},
 			},
+			&cli.IntFlag{
+				Name:    "request-timeout",
+				Usage:   "单次请求超时 (秒, 0 表示无限制)",
+				Value:   0,
+				EnvVars: []string{"REQUEST_TIMEOUT"},
+			},
 			&cli.BoolFlag{
 				Name:    "keepalives",
 				Aliases: []string{"k"},
@@ -122,6 +120,11 @@ func main() {
 				Aliases: []string{"ua"},
 				Usage:   "指定 User-Agent，不填则随机",
 				EnvVars: []string{"USERAGENT"},
+			},
+			&cli.BoolFlag{
+				Name:  "insecure",
+				Usage: "跳过 TLS 证书校验 (仅用于测试)",
+				Value: false,
 			},
 			&cli.StringSliceFlag{
 				Name:  "header",
@@ -137,16 +140,33 @@ func main() {
 				Usage:   "指定包含 URL 列表的文件",
 				EnvVars: []string{"DOWN_FILE"},
 			},
+			&cli.Float64Flag{
+				Name:    "max-traffic",
+				Aliases: []string{"l"},
+				Usage:   "达到指定流量后停止 (单位 GiB, 0 表示无限制)",
+				Value:   0,
+				EnvVars: []string{"MAX_TRAFFIC"},
+			},
+			&cli.IntFlag{
+				Name:    "max-failures",
+				Usage:   "连续失败达到该次数后退出 (目标 down/不可用时避免无限重试, 0 表示禁用)",
+				Value:   0,
+				EnvVars: []string{"MAX_FAILURES"},
+			},
 		},
 		Action: func(c *cli.Context) error {
 			return run(
 				c.Int("concurrency"),
 				c.Int("timeout"),
+				c.Int("request-timeout"),
 				c.Bool("keepalives"),
 				c.String("user-agent"),
 				parseHeaders(c.StringSlice("header")),
 				parseResolve(c.StringSlice("resolve")),
+				c.Bool("insecure"),
 				c.String("file"),
+				c.Float64("max-traffic"),
+				c.Int("max-failures"),
 				c.Args().Slice(),
 			)
 		},
@@ -157,9 +177,13 @@ func main() {
 	}
 }
 
-func run(concurrency, timeout int, keepAlives bool, userAgent string,
+func run(concurrency, timeout, requestTimeout int, keepAlives bool, userAgent string,
 	headers map[string]string, resolveMap map[string]string,
-	fileList string, urls []string) error {
+	insecure bool, fileList string, maxTraffic float64, maxFailures int, urls []string) error {
+
+	if concurrency <= 0 {
+		return fmt.Errorf("concurrency 必须大于 0")
+	}
 
 	startTime := time.Now()
 	log.Printf("程序启动，版本: %s-%s", Version, CurrentCommit)
@@ -192,7 +216,7 @@ func run(concurrency, timeout int, keepAlives bool, userAgent string,
 		TLSHandshakeTimeout:   time.Second * 30,
 		ResponseHeaderTimeout: time.Second * 10,
 		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
+			InsecureSkipVerify: insecure,
 		},
 		// 始终使用自定义 DialContext 以统计真实网络流量
 		DialContext: customDialer(resolveMap, &totalBytes),
@@ -206,6 +230,9 @@ func run(concurrency, timeout int, keepAlives bool, userAgent string,
 	// 统计 goroutine
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	calcStats := func() (float64, float64) {
 		elapsed := time.Since(startTime).Seconds()
@@ -223,16 +250,26 @@ func run(concurrency, timeout int, keepAlives bool, userAgent string,
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 
-		for range ticker.C {
-			// 实时速度计算间隔ms
-			var t float64 = 1000
-			cur := totalBytes.Load()
-			time.Sleep(time.Duration(t) * time.Millisecond)
-			diff := totalBytes.Load() - cur
-			speed := float64(diff) / 1024 / 1024 * 1000 / t
-			totalGB, avg := calcStats()
-			log.Printf("实时速度: %.3f MB/s | 总流量: %.3f GiB | 平均速度: %.3f MB/s",
-				speed, totalGB, avg)
+		var lastBytes uint64
+		lastTime := time.Now()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				now := time.Now()
+				cur := totalBytes.Load()
+				elapsed := now.Sub(lastTime).Seconds()
+				speed := 0.0
+				if elapsed > 0 {
+					speed = float64(cur-lastBytes) / 1024 / 1024 / elapsed
+				}
+				lastBytes = cur
+				lastTime = now
+				totalGB, avg := calcStats()
+				log.Printf("实时速度: %.3f MB/s | 总流量: %.3f GiB | 平均速度: %.3f MB/s",
+					speed, totalGB, avg)
+			}
 		}
 	}()
 
@@ -241,22 +278,73 @@ func run(concurrency, timeout int, keepAlives bool, userAgent string,
 		sig := <-sigChan
 		totalGB, avg := calcStats()
 		log.Printf("收到信号 %v，总流量: %.3f GiB，平均速度: %.3f MB/s", sig, totalGB, avg)
-		os.Exit(0)
+		cancel()
 	}()
 
 	// 超时退出
 	if timeout > 0 {
 		go func() {
-			time.Sleep(time.Duration(timeout) * time.Second)
-			totalGB, avg := calcStats()
-			log.Printf("超时退出，总流量: %.3f GiB，平均速度: %.3f MB/s", totalGB, avg)
-			os.Exit(0)
+			timer := time.NewTimer(time.Duration(timeout) * time.Second)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				totalGB, avg := calcStats()
+				log.Printf("超时退出，总流量: %.3f GiB，平均速度: %.3f MB/s", totalGB, avg)
+				cancel()
+			}
+		}()
+	}
+
+	// 流量上限退出
+	if maxTraffic > 0 {
+		limitBytes := uint64(maxTraffic * 1024 * 1024 * 1024)
+		log.Printf("已设置流量上限: %.3f GiB", maxTraffic)
+		go func() {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if totalBytes.Load() >= limitBytes {
+						totalGB, avg := calcStats()
+						log.Printf("达到流量上限 %.3f GiB，退出。总流量: %.3f GiB，平均速度: %.3f MB/s", maxTraffic, totalGB, avg)
+						cancel()
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	// 连续失败熔断退出 (目标 down / 不可用时避免无限重试)
+	if maxFailures > 0 {
+		log.Printf("已设置连续失败上限: %d 次", maxFailures)
+		go func() {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if consecutiveFailures.Load() >= int64(maxFailures) {
+						totalGB, avg := calcStats()
+						log.Printf("连续失败达到 %d 次，目标可能不可用，退出。总流量: %.3f GiB，平均速度: %.3f MB/s", maxFailures, totalGB, avg)
+						cancel()
+						return
+					}
+				}
+			}
 		}()
 	}
 
 	// 启动 workers
 	var wg sync.WaitGroup
-	urlChan := make(chan string)
+	urlChan := make(chan string, concurrency*2)
 
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
@@ -264,25 +352,69 @@ func run(concurrency, timeout int, keepAlives bool, userAgent string,
 		go func() {
 			defer wg.Done()
 			time.Sleep(time.Duration(r.Intn(10)) * time.Second)
-			for u := range urlChan {
-				download(client, u, userAgent, headers)
+			failStreak := 0
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case u, ok := <-urlChan:
+					if !ok {
+						return
+					}
+					if download(ctx, client, u, userAgent, headers, requestTimeout) {
+						failStreak = 0
+						consecutiveFailures.Store(0)
+						continue
+					}
+					// 失败后指数退避，避免目标 down 时空转打满 CPU / 刷屏日志
+					failStreak++
+					consecutiveFailures.Add(1)
+					backoff := time.Duration(failStreak) * 200 * time.Millisecond
+					if backoff > 5*time.Second {
+						backoff = 5 * time.Second
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(backoff):
+					}
+				}
 			}
 		}()
 	}
 
-	// 无限循环
-	for {
-		for _, u := range urls {
-			urlChan <- u
+	// URL 生产
+	go func() {
+		defer close(urlChan)
+		for {
+			for _, u := range urls {
+				select {
+				case <-ctx.Done():
+					return
+				case urlChan <- u:
+				}
+			}
 		}
-	}
+	}()
+
+	<-ctx.Done()
+	wg.Wait()
+	return nil
 }
 
-func download(client *http.Client, url, userAgent string, headers map[string]string) {
-	req, err := http.NewRequest("GET", url, nil)
+// download 返回 true 表示本次请求成功；返回 false 表示失败 (用于触发退避与熔断)。
+func download(parent context.Context, client *http.Client, url, userAgent string, headers map[string]string, requestTimeout int) bool {
+	ctx := parent
+	var cancel context.CancelFunc
+	if requestTimeout > 0 {
+		ctx, cancel = context.WithTimeout(parent, time.Duration(requestTimeout)*time.Second)
+		defer cancel()
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		log.Println("创建请求失败:", err)
-		return
+		return false
 	}
 
 	if userAgent != "" {
@@ -297,20 +429,33 @@ func download(client *http.Client, url, userAgent string, headers map[string]str
 
 	resp, err := client.Do(req)
 	if err != nil {
+		// 父 context 被取消属于正常退出，不计为失败
+		if parent.Err() != nil {
+			return false
+		}
 		log.Println("请求失败:", err)
-		return
+		return false
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("状态码非200, StatusCode: %v, url: %s\n", resp.StatusCode, url)
+	// 非 2xx (如 403/404/5xx) 拿不到正常流量，视为失败：
+	// 先排空响应体以便复用连接 (keep-alive)，再返回 false 触发退避与熔断。
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("状态码非2xx, StatusCode: %v, url: %s\n", resp.StatusCode, url)
+		io.Copy(io.Discard, resp.Body)
+		return false
 	}
 
 	// 流量统计已在 TCP 层面的 CountingConn 中完成，这里只需读取并丢弃数据
 	_, err = io.Copy(io.Discard, resp.Body)
 	if err != nil {
+		if parent.Err() != nil {
+			return false
+		}
 		log.Println("读取响应失败:", err)
+		return false
 	}
+	return true
 }
 
 func parseHeaders(list []string) map[string]string {
