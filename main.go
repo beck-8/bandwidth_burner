@@ -79,6 +79,11 @@ func (t *targetSet) success(u string) (recovered bool) {
 func (t *targetSet) fail(u string) (n int, shouldLog bool, cooldown time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// 已在冷却中: 这是进入冷却前已发出的在途请求的延迟失败，忽略，
+	// 避免高并发下重复触发冷却、coolRound 被瞬间拉满、日志刷屏。
+	if time.Now().Before(t.coolUntil[u]) {
+		return 0, false, 0
+	}
 	t.fails[u]++
 	n = t.fails[u]
 	if t.maxFails > 0 && n >= t.maxFails {
@@ -96,7 +101,12 @@ func (t *targetSet) fail(u string) (n int, shouldLog bool, cooldown time.Duratio
 		delete(t.lastLog, u)
 		return n, true, d
 	}
-	if last, ok := t.lastLog[u]; !ok || time.Since(last) >= failLogInterval {
+	// 失败日志按 failLogInterval 节流。首次失败只记录时间、不立刻打印，
+	// 这样"快速连失到冷却"只会留下冷却那一条日志，不再多一条"连续1次"；
+	// 慢速失败则在节流间隔到期后打印心跳，保留可见性。
+	if last, ok := t.lastLog[u]; !ok {
+		t.lastLog[u] = time.Now()
+	} else if time.Since(last) >= failLogInterval {
 		shouldLog = true
 		t.lastLog[u] = time.Now()
 	}
