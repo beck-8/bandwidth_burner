@@ -31,70 +31,83 @@ var (
 // 同一个 URL 的失败日志最小打印间隔，避免坏 URL 刷屏。
 const failLogInterval = 5 * time.Second
 
-// targetSet 按 URL 维度跟踪连续失败，用于日志节流与剔除持续失败的死 URL。
+// 失败 URL 的初始冷却时长与上限。每再次触发冷却翻倍，封顶 maxCooldown。
+const (
+	baseCooldown = 5 * time.Second
+	maxCooldown  = 30 * time.Second
+)
+
+// targetSet 按 URL 维度跟踪连续失败，用于日志节流，并对持续失败的 URL
+// 做临时冷却 (而非永久剔除)，冷却到期后重新投入轮询，给它恢复的机会。
 type targetSet struct {
-	mu       sync.Mutex
-	fails    map[string]int       // 每个 URL 当前连续失败次数
-	dropped  map[string]bool      // 已剔除的 URL
-	lastLog  map[string]time.Time // 每个 URL 上次打印失败日志的时间 (节流用)
-	distinct int                  // 去重后的 URL 总数
-	maxFails int                  // 连续失败多少次后剔除 (0 表示永不剔除)
+	mu        sync.Mutex
+	fails     map[string]int       // 每个 URL 当前连续失败次数
+	coolUntil map[string]time.Time // 冷却到期时间 (零值表示不在冷却)
+	coolRound map[string]int       // 已进入冷却的次数 (用于冷却时长升级)
+	lastLog   map[string]time.Time // 每个 URL 上次打印失败日志的时间 (节流用)
+	maxFails  int                  // 连续失败多少次后进入冷却 (0 表示不冷却)
 }
 
-func newTargetSet(urls []string, maxFails int) *targetSet {
-	uniq := make(map[string]struct{}, len(urls))
-	for _, u := range urls {
-		uniq[u] = struct{}{}
-	}
+func newTargetSet(maxFails int) *targetSet {
 	return &targetSet{
-		fails:    make(map[string]int),
-		dropped:  make(map[string]bool),
-		lastLog:  make(map[string]time.Time),
-		distinct: len(uniq),
-		maxFails: maxFails,
+		fails:     make(map[string]int),
+		coolUntil: make(map[string]time.Time),
+		coolRound: make(map[string]int),
+		lastLog:   make(map[string]time.Time),
+		maxFails:  maxFails,
 	}
 }
 
-// success 在请求成功时重置该 URL 的失败状态。
-func (t *targetSet) success(u string) {
+// success 在请求成功时重置该 URL 的失败状态，返回是否从冷却中恢复。
+func (t *targetSet) success(u string) (recovered bool) {
 	t.mu.Lock()
-	if t.fails[u] != 0 {
+	defer t.mu.Unlock()
+	if t.fails[u] != 0 || t.coolRound[u] != 0 {
+		recovered = t.coolRound[u] != 0 // 之前进过冷却才算"恢复"
 		t.fails[u] = 0
+		t.coolRound[u] = 0
 		delete(t.lastLog, u)
 	}
-	t.mu.Unlock()
+	return
 }
 
 // fail 记录一次失败，返回:
 //
-//	n           当前连续失败次数
-//	shouldLog   是否应打印日志 (首次、节流到期或触发剔除时为 true)
-//	justDropped 本次是否触发剔除
-//	allDropped  是否所有 URL 都已被剔除
-func (t *targetSet) fail(u string) (n int, shouldLog, justDropped, allDropped bool) {
+//	n         当前连续失败次数
+//	shouldLog 是否应打印失败日志 (首次或节流到期时为 true)
+//	cooldown  若本次触发冷却则返回冷却时长，否则为 0
+func (t *targetSet) fail(u string) (n int, shouldLog bool, cooldown time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.dropped[u] {
-		// 已剔除: 缓冲区里的残余请求，静默跳过
-		return 0, false, false, len(t.dropped) >= t.distinct
-	}
 	t.fails[u]++
 	n = t.fails[u]
 	if t.maxFails > 0 && n >= t.maxFails {
-		t.dropped[u] = true
-		justDropped, shouldLog = true, true
-	} else if last, ok := t.lastLog[u]; !ok || time.Since(last) >= failLogInterval {
+		// 进入冷却: 时长随冷却次数翻倍升级，封顶 maxCooldown
+		d := baseCooldown
+		for i := 0; i < t.coolRound[u] && d < maxCooldown; i++ {
+			d *= 2
+		}
+		if d > maxCooldown {
+			d = maxCooldown
+		}
+		t.coolUntil[u] = time.Now().Add(d)
+		t.coolRound[u]++
+		t.fails[u] = 0 // 冷却结束后重新计数
+		delete(t.lastLog, u)
+		return n, true, d
+	}
+	if last, ok := t.lastLog[u]; !ok || time.Since(last) >= failLogInterval {
 		shouldLog = true
 		t.lastLog[u] = time.Now()
 	}
-	allDropped = len(t.dropped) >= t.distinct
-	return
+	return n, shouldLog, 0
 }
 
-func (t *targetSet) isDropped(u string) bool {
+// cooling 返回该 URL 此刻是否处于冷却期 (不应被派发/请求)。
+func (t *targetSet) cooling(u string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.dropped[u]
+	return time.Now().Before(t.coolUntil[u])
 }
 
 // CountingConn 包装 net.Conn，统计真实的TCP层面的读写字节数
@@ -388,10 +401,10 @@ func run(concurrency, timeout, requestTimeout int, keepAlives bool, userAgent st
 		}()
 	}
 
-	// 按 URL 跟踪失败: 连续失败超阈值则剔除，日志按 URL 节流
-	tracker := newTargetSet(urls, maxFailures)
+	// 按 URL 跟踪失败: 连续失败超阈值则临时冷却，日志按 URL 节流
+	tracker := newTargetSet(maxFailures)
 	if maxFailures > 0 {
-		log.Printf("已启用死 URL 剔除: 单个 URL 连续失败 %d 次后剔除", maxFailures)
+		log.Printf("已启用 URL 失败冷却: 单个 URL 连续失败 %d 次后冷却 (最长 %s)", maxFailures, maxCooldown)
 	}
 
 	// 启动 workers
@@ -413,26 +426,22 @@ func run(concurrency, timeout, requestTimeout int, keepAlives bool, userAgent st
 					if !ok {
 						return
 					}
-					if tracker.isDropped(u) {
-						continue // 已剔除的残余请求，跳过
+					if tracker.cooling(u) {
+						continue // 冷却中的残余请求，跳过
 					}
 					if err := download(ctx, client, u, userAgent, headers, requestTimeout); err == nil {
 						failStreak = 0
-						tracker.success(u)
+						if tracker.success(u) {
+							log.Printf("URL 恢复正常: %s", u)
+						}
 						continue
 					} else {
-						n, shouldLog, justDropped, allDropped := tracker.fail(u)
+						n, shouldLog, cooldown := tracker.fail(u)
 						switch {
-						case justDropped:
-							log.Printf("连续失败 %d 次，剔除 URL: %s (%v)", n, u, err)
+						case cooldown > 0:
+							log.Printf("连续失败 %d 次，冷却 %s 后重试: %s (%v)", n, cooldown, u, err)
 						case shouldLog:
 							log.Printf("请求失败 (连续 %d 次) %s: %v", n, u, err)
-						}
-						if allDropped {
-							totalGB, avg := calcStats()
-							log.Printf("所有 URL 均已失效，退出。总流量: %.3f GiB，平均速度: %.3f MB/s", totalGB, avg)
-							cancel()
-							return
 						}
 					}
 					// 失败后指数退避，避免空转打满 CPU
@@ -451,13 +460,13 @@ func run(concurrency, timeout, requestTimeout int, keepAlives bool, userAgent st
 		}()
 	}
 
-	// URL 生产: 轮询派发，跳过已剔除的 URL
+	// URL 生产: 轮询派发，跳过正在冷却的 URL
 	go func() {
 		defer close(urlChan)
 		for {
 			pushed := false
 			for _, u := range urls {
-				if tracker.isDropped(u) {
+				if tracker.cooling(u) {
 					continue
 				}
 				select {
@@ -467,9 +476,13 @@ func run(concurrency, timeout, requestTimeout int, keepAlives bool, userAgent st
 					pushed = true
 				}
 			}
-			// 一整轮都没派发出去 = 所有 URL 已被剔除，停止生产 (worker 侧会触发退出)
+			// 一整轮都在冷却，稍等再试 (不退出，给它们恢复机会)
 			if !pushed {
-				return
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(time.Second):
+				}
 			}
 		}
 	}()
