@@ -230,7 +230,7 @@ func main() {
 			},
 			&cli.IntFlag{
 				Name:    "max-failures",
-				Usage:   "单个 URL 连续失败该次数后从轮询中剔除 (全部剔除则退出, 0 表示永不剔除)",
+				Usage:   "单个 URL 连续失败该次数后临时冷却 (冷却最长30s, 到期重试, 0 表示不冷却)",
 				Value:   10,
 				EnvVars: []string{"MAX_FAILURES"},
 			},
