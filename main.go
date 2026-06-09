@@ -23,11 +23,79 @@ import (
 )
 
 var (
-	Version             = "dev"
-	CurrentCommit       = "unknown"
-	totalBytes          atomic.Uint64
-	consecutiveFailures atomic.Int64
+	Version       = "dev"
+	CurrentCommit = "unknown"
+	totalBytes    atomic.Uint64
 )
+
+// 同一个 URL 的失败日志最小打印间隔，避免坏 URL 刷屏。
+const failLogInterval = 5 * time.Second
+
+// targetSet 按 URL 维度跟踪连续失败，用于日志节流与剔除持续失败的死 URL。
+type targetSet struct {
+	mu       sync.Mutex
+	fails    map[string]int       // 每个 URL 当前连续失败次数
+	dropped  map[string]bool      // 已剔除的 URL
+	lastLog  map[string]time.Time // 每个 URL 上次打印失败日志的时间 (节流用)
+	distinct int                  // 去重后的 URL 总数
+	maxFails int                  // 连续失败多少次后剔除 (0 表示永不剔除)
+}
+
+func newTargetSet(urls []string, maxFails int) *targetSet {
+	uniq := make(map[string]struct{}, len(urls))
+	for _, u := range urls {
+		uniq[u] = struct{}{}
+	}
+	return &targetSet{
+		fails:    make(map[string]int),
+		dropped:  make(map[string]bool),
+		lastLog:  make(map[string]time.Time),
+		distinct: len(uniq),
+		maxFails: maxFails,
+	}
+}
+
+// success 在请求成功时重置该 URL 的失败状态。
+func (t *targetSet) success(u string) {
+	t.mu.Lock()
+	if t.fails[u] != 0 {
+		t.fails[u] = 0
+		delete(t.lastLog, u)
+	}
+	t.mu.Unlock()
+}
+
+// fail 记录一次失败，返回:
+//
+//	n           当前连续失败次数
+//	shouldLog   是否应打印日志 (首次、节流到期或触发剔除时为 true)
+//	justDropped 本次是否触发剔除
+//	allDropped  是否所有 URL 都已被剔除
+func (t *targetSet) fail(u string) (n int, shouldLog, justDropped, allDropped bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.dropped[u] {
+		// 已剔除: 缓冲区里的残余请求，静默跳过
+		return 0, false, false, len(t.dropped) >= t.distinct
+	}
+	t.fails[u]++
+	n = t.fails[u]
+	if t.maxFails > 0 && n >= t.maxFails {
+		t.dropped[u] = true
+		justDropped, shouldLog = true, true
+	} else if last, ok := t.lastLog[u]; !ok || time.Since(last) >= failLogInterval {
+		shouldLog = true
+		t.lastLog[u] = time.Now()
+	}
+	allDropped = len(t.dropped) >= t.distinct
+	return
+}
+
+func (t *targetSet) isDropped(u string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.dropped[u]
+}
 
 // CountingConn 包装 net.Conn，统计真实的TCP层面的读写字节数
 type CountingConn struct {
@@ -149,8 +217,8 @@ func main() {
 			},
 			&cli.IntFlag{
 				Name:    "max-failures",
-				Usage:   "连续失败达到该次数后退出 (目标 down/不可用时避免无限重试, 0 表示禁用)",
-				Value:   0,
+				Usage:   "单个 URL 连续失败该次数后从轮询中剔除 (全部剔除则退出, 0 表示永不剔除)",
+				Value:   10,
 				EnvVars: []string{"MAX_FAILURES"},
 			},
 		},
@@ -320,26 +388,10 @@ func run(concurrency, timeout, requestTimeout int, keepAlives bool, userAgent st
 		}()
 	}
 
-	// 连续失败熔断退出 (目标 down / 不可用时避免无限重试)
+	// 按 URL 跟踪失败: 连续失败超阈值则剔除，日志按 URL 节流
+	tracker := newTargetSet(urls, maxFailures)
 	if maxFailures > 0 {
-		log.Printf("已设置连续失败上限: %d 次", maxFailures)
-		go func() {
-			ticker := time.NewTicker(time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					if consecutiveFailures.Load() >= int64(maxFailures) {
-						totalGB, avg := calcStats()
-						log.Printf("连续失败达到 %d 次，目标可能不可用，退出。总流量: %.3f GiB，平均速度: %.3f MB/s", maxFailures, totalGB, avg)
-						cancel()
-						return
-					}
-				}
-			}
-		}()
+		log.Printf("已启用死 URL 剔除: 单个 URL 连续失败 %d 次后剔除", maxFailures)
 	}
 
 	// 启动 workers
@@ -361,14 +413,30 @@ func run(concurrency, timeout, requestTimeout int, keepAlives bool, userAgent st
 					if !ok {
 						return
 					}
-					if download(ctx, client, u, userAgent, headers, requestTimeout) {
-						failStreak = 0
-						consecutiveFailures.Store(0)
-						continue
+					if tracker.isDropped(u) {
+						continue // 已剔除的残余请求，跳过
 					}
-					// 失败后指数退避，避免目标 down 时空转打满 CPU / 刷屏日志
+					if err := download(ctx, client, u, userAgent, headers, requestTimeout); err == nil {
+						failStreak = 0
+						tracker.success(u)
+						continue
+					} else {
+						n, shouldLog, justDropped, allDropped := tracker.fail(u)
+						switch {
+						case justDropped:
+							log.Printf("连续失败 %d 次，剔除 URL: %s (%v)", n, u, err)
+						case shouldLog:
+							log.Printf("请求失败 (连续 %d 次) %s: %v", n, u, err)
+						}
+						if allDropped {
+							totalGB, avg := calcStats()
+							log.Printf("所有 URL 均已失效，退出。总流量: %.3f GiB，平均速度: %.3f MB/s", totalGB, avg)
+							cancel()
+							return
+						}
+					}
+					// 失败后指数退避，避免空转打满 CPU
 					failStreak++
-					consecutiveFailures.Add(1)
 					backoff := time.Duration(failStreak) * 200 * time.Millisecond
 					if backoff > 5*time.Second {
 						backoff = 5 * time.Second
@@ -383,16 +451,25 @@ func run(concurrency, timeout, requestTimeout int, keepAlives bool, userAgent st
 		}()
 	}
 
-	// URL 生产
+	// URL 生产: 轮询派发，跳过已剔除的 URL
 	go func() {
 		defer close(urlChan)
 		for {
+			pushed := false
 			for _, u := range urls {
+				if tracker.isDropped(u) {
+					continue
+				}
 				select {
 				case <-ctx.Done():
 					return
 				case urlChan <- u:
+					pushed = true
 				}
+			}
+			// 一整轮都没派发出去 = 所有 URL 已被剔除，停止生产 (worker 侧会触发退出)
+			if !pushed {
+				return
 			}
 		}
 	}()
@@ -402,8 +479,9 @@ func run(concurrency, timeout, requestTimeout int, keepAlives bool, userAgent st
 	return nil
 }
 
-// download 返回 true 表示本次请求成功；返回 false 表示失败 (用于触发退避与熔断)。
-func download(parent context.Context, client *http.Client, url, userAgent string, headers map[string]string, requestTimeout int) bool {
+// download 执行一次下载。返回 nil 表示成功，否则返回失败原因 (供调用方退避/剔除)。
+// 父 context 被取消属于正常退出，返回 nil (不计为失败)。
+func download(parent context.Context, client *http.Client, url, userAgent string, headers map[string]string, requestTimeout int) error {
 	ctx := parent
 	var cancel context.CancelFunc
 	if requestTimeout > 0 {
@@ -413,8 +491,7 @@ func download(parent context.Context, client *http.Client, url, userAgent string
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		log.Println("创建请求失败:", err)
-		return false
+		return err
 	}
 
 	if userAgent != "" {
@@ -429,33 +506,28 @@ func download(parent context.Context, client *http.Client, url, userAgent string
 
 	resp, err := client.Do(req)
 	if err != nil {
-		// 父 context 被取消属于正常退出，不计为失败
 		if parent.Err() != nil {
-			return false
+			return nil
 		}
-		log.Println("请求失败:", err)
-		return false
+		return err
 	}
 	defer resp.Body.Close()
 
 	// 非 2xx (如 403/404/5xx) 拿不到正常流量，视为失败：
-	// 先排空响应体以便复用连接 (keep-alive)，再返回 false 触发退避与熔断。
+	// 先排空响应体以便复用连接 (keep-alive)，再返回错误。
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("状态码非2xx, StatusCode: %v, url: %s\n", resp.StatusCode, url)
 		io.Copy(io.Discard, resp.Body)
-		return false
+		return fmt.Errorf("状态码非2xx: %d", resp.StatusCode)
 	}
 
 	// 流量统计已在 TCP 层面的 CountingConn 中完成，这里只需读取并丢弃数据
-	_, err = io.Copy(io.Discard, resp.Body)
-	if err != nil {
+	if _, err = io.Copy(io.Discard, resp.Body); err != nil {
 		if parent.Err() != nil {
-			return false
+			return nil
 		}
-		log.Println("读取响应失败:", err)
-		return false
+		return err
 	}
-	return true
+	return nil
 }
 
 func parseHeaders(list []string) map[string]string {

@@ -39,7 +39,7 @@
 | resolve | N/A | 无 | 自定义域名解析 | `-resolve "example.com:80:1.2.3.4"` |
 | insecure | N/A | false | 跳过TLS证书校验(仅测试) | `--insecure` |
 | max-traffic | -l | 0 | 达到指定流量后停止(GiB, 0不限制) | `-l 100` |
-| max-failures | N/A | 0 | 连续失败达到该次数后退出(0禁用) | `--max-failures 100` |
+| max-failures | N/A | 10 | 单个URL连续失败该次数后剔除(全部剔除则退出, 0不剔除) | `--max-failures 20` |
 | version | -v | - | 显示版本信息 | `-v` |
 
 ### 环境变量支持
@@ -50,7 +50,7 @@
 | TIMEOUT | -t | 超时时间 | `export TIMEOUT=300` |
 | REQUEST_TIMEOUT | --request-timeout | 单次请求超时 | `export REQUEST_TIMEOUT=15` |
 | MAX_TRAFFIC | -l | 流量上限(GiB) | `export MAX_TRAFFIC=100` |
-| MAX_FAILURES | --max-failures | 连续失败上限 | `export MAX_FAILURES=100` |
+| MAX_FAILURES | --max-failures | 单URL连续失败剔除阈值 | `export MAX_FAILURES=20` |
 | KeepAlives | -k | Keep-Alive开关 | `export KeepAlives=1` |
 | UserAgent | -ua | User-Agent字符串 | `export UserAgent="Bot"` |
 | DOWN_FILE | - | URL文件路径 | `export DOWN_FILE=urls.txt` |
